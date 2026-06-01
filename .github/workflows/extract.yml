@@ -23,20 +23,28 @@ jobs:
       - name: Extract
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Continue'
           choco install 7zip -y --no-progress | Out-Null
           $z = "C:\Program Files\7-Zip\7z.exe"
           New-Item -ItemType Directory -Force out | Out-Null
           $pw = "${{ inputs.archive_password }}"
-          # WiX bundle? extract inner MSI + runtimes via /layout, but NEVER let it hang the job
-          $p = Start-Process .\installer.bin -ArgumentList '/layout','C:\layout','/quiet' -PassThru -ErrorAction SilentlyContinue
-          if ($p) { if (-not $p.WaitForExit(480000)) { Write-Host '/layout timed out after 8m - killing'; $p.Kill() } }
-          # generic crack-open (rar/zip/nsis/inno/msi); harmless if it fails
+          # give it an .exe name so Windows can actually launch a bundle/installer
+          Copy-Item installer.bin installer.exe -Force
+          # WiX/EXE bundle: /layout extracts inner MSI + runtimes, bounded so it can't hang
+          try {
+            $p = Start-Process .\installer.exe -ArgumentList '/layout','C:\layout','/quiet' -PassThru
+            if ($p) { if (-not $p.WaitForExit(480000)) { Write-Host '/layout timed out - killing'; $p.Kill() } }
+          } catch { Write-Host "layout skipped: $_" }
+          # generic crack-open (rar/zip/nsis/inno/msi) - works by content regardless of extension
           & $z x installer.bin "-oout" -y ("-p" + $pw)
           # any MSI (from layout or 7z) -> administrative install = extract files, no real install
           Get-ChildItem -Recurse out,C:\layout -Filter *.msi -ErrorAction SilentlyContinue | ForEach-Object {
-            $p2 = Start-Process msiexec -ArgumentList '/a',('"'+$_.FullName+'"'),('TARGETDIR="'+$PWD+'\msi_out"'),'/qn' -PassThru
-            if (-not $p2.WaitForExit(480000)) { $p2.Kill() }
+            try {
+              $p2 = Start-Process msiexec -ArgumentList '/a',('"'+$_.FullName+'"'),('TARGETDIR="'+$PWD+'\msi_out"'),'/qn' -PassThru
+              if (-not $p2.WaitForExit(480000)) { $p2.Kill() }
+            } catch {}
           }
+          Write-Host "extract step done"; exit 0
 
       - name: Collect images and databases
         shell: pwsh
