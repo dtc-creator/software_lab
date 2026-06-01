@@ -6,56 +6,30 @@ on:
         description: "Direct URL to JproFullSetup.exe"
         required: true
         default: "https://s3.amazonaws.com/JPROUpdate/JPRO+Fleet+Diagnostics/JproFullSetup.exe"
-      activator_url:
-        description: "Direct URL to activator zip (optional)"
-        required: false
-        default: ""
 
 jobs:
   install-shot:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
-      - name: Download + extract payloads (MSI + runtimes)
+      - name: Download installer
         shell: pwsh
-        run: |
-          Invoke-WebRequest "${{ inputs.installer_url }}" -OutFile setup.exe
-          choco install 7zip -y --no-progress | Out-Null
-          & "C:\Program Files\7-Zip\7z.exe" x setup.exe -oout -y
-          Get-ChildItem out | Select Name,Length
+        run: Invoke-WebRequest "${{ inputs.installer_url }}" -OutFile setup.exe
 
-      - name: Install runtimes (.NET 8 + ASP.NET + WebView2)
+      - name: Install JPRO via bootstrapper (full time + log)
         shell: pwsh
-        timeout-minutes: 15
+        timeout-minutes: 55
         continue-on-error: true
         run: |
-          $r = Get-ChildItem out -Filter *.exe
-          foreach($f in $r){
-            Write-Host "installing $($f.Name)"
-            if($f.Name -like '*Webview2*'){ Start-Process $f.FullName -ArgumentList '/silent','/install' -Wait }
-            elseif($f.Name -like '*runtime*'){ Start-Process $f.FullName -ArgumentList '/install','/quiet','/norestart' -Wait }
-          }
-
-      - name: Install JPRO MSI directly
-        shell: pwsh
-        timeout-minutes: 20
-        continue-on-error: true
-        run: |
-          $msi = Get-ChildItem out -Filter *.msi | Select-Object -First 1
-          Write-Host "installing $($msi.Name)"
-          $p = Start-Process msiexec -ArgumentList '/i',('"'+$msi.FullName+'"'),'/qn','/norestart','ALLUSERS=1','/l*v','msi.log' -PassThru
-          if(-not $p.WaitForExit(1080000)){ $p.Kill(); Write-Host 'msi timed out' } else { Write-Host "msi exit: $($p.ExitCode)" }
+          Copy-Item setup.exe setup_install.exe -Force
+          $p = Start-Process .\setup_install.exe -ArgumentList '/quiet','/norestart','/log','boot.log' -PassThru
+          if(-not $p.WaitForExit(2900000)){ Write-Host 'bootstrapper still running at 48m'; } else { Write-Host "bootstrapper exit: $($p.ExitCode)" }
           Get-ChildItem 'C:\Program Files','C:\Program Files (x86)' -Recurse -Include 'Fleets.exe','_JPRO_start.exe','JPRO.exe' -EA SilentlyContinue | Select FullName
-
-      - name: Apply activator (optional)
-        if: ${{ inputs.activator_url != '' }}
-        shell: pwsh
-        continue-on-error: true
-        run: |
-          Invoke-WebRequest "${{ inputs.activator_url }}" -OutFile act.zip
-          Expand-Archive act.zip -DestinationPath act -Force
-          $fl = Get-ChildItem 'C:\Program Files','C:\Program Files (x86)' -Recurse -Filter 'Fleets.exe' -EA SilentlyContinue | Select-Object -First 1
-          if($fl){ Copy-Item (Join-Path act '*') $fl.DirectoryName -Force -Recurse -EA SilentlyContinue; Write-Host "activator copied to $($fl.DirectoryName)" }
+          # collect burn logs
+          New-Item -ItemType Directory -Force logs | Out-Null
+          Copy-Item boot.log logs\ -EA SilentlyContinue
+          Get-ChildItem $env:TEMP -Filter '*JPRO*.log' -EA SilentlyContinue | Copy-Item -Destination logs\ -EA SilentlyContinue
+          Get-ChildItem $env:TEMP -Filter '*Fleets*log' -EA SilentlyContinue | Copy-Item -Destination logs\ -EA SilentlyContinue
 
       - name: Launch JPRO + screenshot burst
         shell: pwsh
@@ -69,17 +43,13 @@ jobs:
             $bmp.Save("$PWD\shots\$n.png") }
           $exe = Get-ChildItem 'C:\Program Files','C:\Program Files (x86)' -Recurse -Include '_JPRO_start.exe','Fleets.exe' -EA SilentlyContinue | Select-Object -First 1
           if($exe){ Write-Host "launching $($exe.FullName)"; Start-Process $exe.FullName } else { Write-Host "JPRO exe NOT found" }
-          for($i=1;$i -le 18;$i++){
-            Start-Sleep 20
-            # bring any JPRO window to front
-            (Get-Process | Where-Object {$_.MainWindowTitle -match 'JPRO|Fleet'} | Select -First 1) | ForEach-Object {
-              [void][System.Windows.Forms.SendKeys]::SendWait('') }
-            Shot ("{0:d2}_jpro" -f $i)
-          }
+          for($i=1;$i -le 18;$i++){ Start-Sleep 20; Shot ("{0:d2}_jpro" -f $i) }
           Get-Process | Where-Object {$_.MainWindowTitle} | Select ProcessName,MainWindowTitle | Format-Table -Auto | Out-String | Write-Host
 
-      - name: Upload screenshots
+      - name: Upload results
         uses: actions/upload-artifact@v4
         with:
           name: jpro-screenshots
-          path: shots
+          path: |
+            shots
+            logs
