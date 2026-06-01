@@ -22,38 +22,44 @@ jobs:
 
       - name: Extract
         shell: pwsh
+        timeout-minutes: 12
+        continue-on-error: true
         run: |
           $ErrorActionPreference = 'Continue'
           choco install 7zip -y --no-progress | Out-Null
           $z = "C:\Program Files\7-Zip\7z.exe"
-          New-Item -ItemType Directory -Force out | Out-Null
+          New-Item -ItemType Directory -Force out,msi_out,layout | Out-Null
           $pw = "${{ inputs.archive_password }}"
-          # give it an .exe name so Windows can actually launch a bundle/installer
           Copy-Item installer.bin installer.exe -Force
-          # WiX/EXE bundle: /layout extracts inner MSI + runtimes, bounded so it can't hang
-          try {
-            $p = Start-Process .\installer.exe -ArgumentList '/layout','C:\layout','/quiet' -PassThru
-            if ($p) { if (-not $p.WaitForExit(480000)) { Write-Host '/layout timed out - killing'; $p.Kill() } }
-          } catch { Write-Host "layout skipped: $_" }
-          # generic crack-open (rar/zip/nsis/inno/msi) - works by content regardless of extension
+          # 1) generic crack-open: handles zip/rar/nsis/inno/most exe + msi (by content)
           & $z x installer.bin "-oout" -y ("-p" + $pw)
-          # any MSI (from layout or 7z) -> administrative install = extract files, no real install
-          Get-ChildItem -Recurse out,C:\layout -Filter *.msi -ErrorAction SilentlyContinue | ForEach-Object {
-            try {
-              $p2 = Start-Process msiexec -ArgumentList '/a',('"'+$_.FullName+'"'),('TARGETDIR="'+$PWD+'\msi_out"'),'/qn' -PassThru
-              if (-not $p2.WaitForExit(480000)) { $p2.Kill() }
-            } catch {}
+          # 2) WiX bundle: dark.exe extracts payloads (incl. inner MSI) synchronously - no relaunch
+          choco install wixtoolset -y --no-progress | Out-Null
+          $dark = Get-ChildItem 'C:\Program Files (x86)\WiX Toolset*\bin\dark.exe' -EA SilentlyContinue | Select-Object -First 1
+          if ($dark) { & $dark.FullName -x layout installer.exe } else { Write-Host 'dark.exe not found' }
+          # 3) any MSI found -> administrative install = extract files, no real install
+          Get-ChildItem -Recurse out,layout -Filter *.msi -EA SilentlyContinue | ForEach-Object {
+            Start-Process msiexec -ArgumentList '/a',('"'+$_.FullName+'"'),('TARGETDIR="'+$PWD+'\msi_out"'),'/qn' -Wait
           }
-          Write-Host "extract step done"; exit 0
+          Write-Host "extract step done"
 
       - name: Collect images and databases
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force artifacts\pictures | Out-Null
-          $src = @("out","msi_out","C:\layout") | Where-Object { Test-Path $_ }
-          Get-ChildItem -Recurse $src -Include *.png,*.jpg,*.jpeg,*.bmp,*.ico -ErrorAction SilentlyContinue | Copy-Item -Destination artifacts\pictures -ErrorAction SilentlyContinue
-          Get-ChildItem -Recurse $src -Include *.db,*.sdf,*.sqlite,*.mdb,*.accdb -ErrorAction SilentlyContinue | Copy-Item -Destination artifacts -ErrorAction SilentlyContinue
-          Get-ChildItem -Recurse $src -ErrorAction SilentlyContinue | Select-Object FullName,Length | Export-Csv artifacts\manifest.csv -NoTypeInformation
+          # always grab the product icon straight from the exe (works even if extraction failed)
+          try {
+            Add-Type -AssemblyName System.Drawing
+            $ico = [System.Drawing.Icon]::ExtractAssociatedIcon((Resolve-Path installer.exe))
+            $ico.ToBitmap().Save("$PWD\artifacts\pictures\app_icon.png")
+          } catch { Write-Host "icon grab failed: $_" }
+          $src = @("out","msi_out","layout") | Where-Object { Test-Path $_ }
+          if ($src) {
+            Get-ChildItem -Recurse $src -Include *.png,*.jpg,*.jpeg,*.bmp,*.ico -EA SilentlyContinue | Copy-Item -Destination artifacts\pictures -EA SilentlyContinue
+            Get-ChildItem -Recurse $src -Include *.db,*.sdf,*.sqlite,*.mdb,*.accdb -EA SilentlyContinue | Copy-Item -Destination artifacts -EA SilentlyContinue
+            Get-ChildItem -Recurse $src -EA SilentlyContinue | Select-Object FullName,Length | Export-Csv artifacts\manifest.csv -NoTypeInformation
+          }
+          Write-Host ("images: " + (Get-ChildItem artifacts\pictures -EA SilentlyContinue).Count)
 
       - name: Upload results
         uses: actions/upload-artifact@v4
