@@ -19,41 +19,39 @@ jobs:
           Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
           Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-
-      - name: Prep bore + start JPRO install (background)
-        shell: pwsh
-        run: |
-          cargo install bore-cli 2>&1 | Select-Object -Last 2
+          cargo install bore-cli 2>&1 | Select-Object -Last 1
           Invoke-WebRequest "https://s3.amazonaws.com/JPROUpdate/JPRO+Fleet+Diagnostics/JproFullSetup.exe" -OutFile C:\setup.exe
-          Start-Process C:\setup.exe -ArgumentList '/quiet','/norestart'
           New-Item -ItemType Directory -Force C:\jpro_drop | Out-Null
 
-      - name: Start tunnel + write address back to repo
+      - name: Tunnel + JPRO install + hold (single step keeps bore alive)
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # start JPRO install in background (lives for this whole step)
+          Start-Process C:\setup.exe -ArgumentList '/quiet','/norestart'
+          # start bore tunnel (lives for this whole step)
           $bore = "$env:USERPROFILE\.cargo\bin\bore.exe"
-          Start-Process $bore -ArgumentList 'local','3389','--to','bore.pub' -RedirectStandardOutput C:\bore.out -RedirectStandardError C:\bore.err -NoNewWindow
+          $proc = Start-Process $bore -ArgumentList 'local','3389','--to','bore.pub' -RedirectStandardOutput C:\bore.out -RedirectStandardError C:\bore.err -PassThru -NoNewWindow
           Start-Sleep 12
           $line = (Get-Content C:\bore.out,C:\bore.err -EA SilentlyContinue | Select-String 'bore.pub:\d+' | Select-Object -First 1)
-          if($line -match 'bore\.pub:(\d+)'){ $addr = "bore.pub:" + $Matches[1] } else { $addr = "TUNNEL-FAILED: $line" }
+          if($line -match 'bore\.pub:(\d+)'){ $addr = "bore.pub:" + $Matches[1] } else { $addr = "FAILED: $line" }
           Write-Host "ADDRESS: $addr"
-          # write to repo file rdp_address.txt via API (handle existing sha)
-          $repo = $env:GITHUB_REPOSITORY
-          $hdr = @{ Authorization = "token $env:GH_TOKEN"; "User-Agent"="runner"; Accept="application/vnd.github+json" }
-          $sha = $null
-          try { $sha = (Invoke-RestMethod -Headers $hdr -Uri "https://api.github.com/repos/$repo/contents/rdp_address.txt").sha } catch {}
-          $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($addr + "  (user: runneradmin)"))
-          $body = @{ message="rdp address"; content=$b64 } ; if($sha){ $body.sha=$sha }
-          Invoke-RestMethod -Method PUT -Headers $hdr -Uri "https://api.github.com/repos/$repo/contents/rdp_address.txt" -Body ($body|ConvertTo-Json) | Out-Null
-          Write-Host "address committed to repo: rdp_address.txt"
-
-      - name: Hold session open
-        shell: pwsh
-        run: |
+          # publish address to repo
+          $repo=$env:GITHUB_REPOSITORY
+          $hdr=@{Authorization="token $env:GH_TOKEN";"User-Agent"="runner";Accept="application/vnd.github+json"}
+          $sha=$null; try{ $sha=(Invoke-RestMethod -Headers $hdr -Uri "https://api.github.com/repos/$repo/contents/rdp_address.txt").sha }catch{}
+          $b64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($addr+"  user=runneradmin"))
+          $body=@{message="rdp addr";content=$b64}; if($sha){$body.sha=$sha}
+          Invoke-RestMethod -Method PUT -Headers $hdr -Uri "https://api.github.com/repos/$repo/contents/rdp_address.txt" -Body ($body|ConvertTo-Json)|Out-Null
+          Write-Host "published rdp_address.txt = $addr"
+          # HOLD: keep this step (and bore) alive; restart bore if it dies
           $mins=[int]"${{ inputs.minutes }}"
-          for($i=0;$i -lt $mins;$i++){ Start-Sleep 60; if($i % 10 -eq 0){ Write-Host "alive $i/$mins" } }
+          for($i=0;$i -lt $mins;$i++){
+            Start-Sleep 60
+            if($proc.HasExited){ Write-Host "bore died, restarting"; $proc=Start-Process $bore -ArgumentList 'local','3389','--to','bore.pub' -PassThru -NoNewWindow }
+            if($i % 10 -eq 0){ Write-Host "alive $i/$mins" }
+          }
 
       - name: Collect screenshots
         if: always()
@@ -63,6 +61,4 @@ jobs:
           Copy-Item C:\jpro_drop\* shots\ -Recurse -EA SilentlyContinue
       - uses: actions/upload-artifact@v4
         if: always()
-        with:
-          name: jpro-rdp-shots
-          path: shots
+        with: { name: jpro-rdp-shots, path: shots }
