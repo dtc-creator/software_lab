@@ -5,7 +5,8 @@ on:
       minutes:
         description: "Keep the RDP session open this many minutes (max 340)"
         default: "180"
-
+permissions:
+  contents: write
 jobs:
   rdp:
     runs-on: windows-latest
@@ -18,7 +19,6 @@ jobs:
           Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
           Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          Write-Host "RDP enabled (user: runneradmin)"
 
       - name: Prep bore + start JPRO install (background)
         shell: pwsh
@@ -27,27 +27,33 @@ jobs:
           Invoke-WebRequest "https://s3.amazonaws.com/JPROUpdate/JPRO+Fleet+Diagnostics/JproFullSetup.exe" -OutFile C:\setup.exe
           Start-Process C:\setup.exe -ArgumentList '/quiet','/norestart'
           New-Item -ItemType Directory -Force C:\jpro_drop | Out-Null
-          Write-Host "JPRO installing in background; save screenshots to C:\jpro_drop"
 
-      - name: Start tunnel + PRINT ADDRESS (this step completes)
+      - name: Start tunnel + write address back to repo
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $bore = "$env:USERPROFILE\.cargo\bin\bore.exe"
           Start-Process $bore -ArgumentList 'local','3389','--to','bore.pub' -RedirectStandardOutput C:\bore.out -RedirectStandardError C:\bore.err -NoNewWindow
           Start-Sleep 12
-          $addr = (Get-Content C:\bore.out,C:\bore.err -EA SilentlyContinue | Select-String 'bore.pub:\d+' | Select-Object -First 1)
-          Write-Host "RAW: $addr"
-          if($addr -match 'bore\.pub:(\d+)'){
-            $hostport = "bore.pub:" + $Matches[1]
-            Write-Host "::notice title=RDP ADDRESS::$hostport  user=runneradmin"
-            Write-Host "CONNECT_RDP=$hostport"
-          } else { Write-Host "tunnel address not found yet"; Get-Content C:\bore.out,C:\bore.err -EA SilentlyContinue | Write-Host }
+          $line = (Get-Content C:\bore.out,C:\bore.err -EA SilentlyContinue | Select-String 'bore.pub:\d+' | Select-Object -First 1)
+          if($line -match 'bore\.pub:(\d+)'){ $addr = "bore.pub:" + $Matches[1] } else { $addr = "TUNNEL-FAILED: $line" }
+          Write-Host "ADDRESS: $addr"
+          # write to repo file rdp_address.txt via API (handle existing sha)
+          $repo = $env:GITHUB_REPOSITORY
+          $hdr = @{ Authorization = "token $env:GH_TOKEN"; "User-Agent"="runner"; Accept="application/vnd.github+json" }
+          $sha = $null
+          try { $sha = (Invoke-RestMethod -Headers $hdr -Uri "https://api.github.com/repos/$repo/contents/rdp_address.txt").sha } catch {}
+          $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($addr + "  (user: runneradmin)"))
+          $body = @{ message="rdp address"; content=$b64 } ; if($sha){ $body.sha=$sha }
+          Invoke-RestMethod -Method PUT -Headers $hdr -Uri "https://api.github.com/repos/$repo/contents/rdp_address.txt" -Body ($body|ConvertTo-Json) | Out-Null
+          Write-Host "address committed to repo: rdp_address.txt"
 
       - name: Hold session open
         shell: pwsh
         run: |
           $mins=[int]"${{ inputs.minutes }}"
-          for($i=0;$i -lt $mins;$i++){ Start-Sleep 60; if($i % 10 -eq 0){ Write-Host "session alive: $i / $mins min" } }
+          for($i=0;$i -lt $mins;$i++){ Start-Sleep 60; if($i % 10 -eq 0){ Write-Host "alive $i/$mins" } }
 
       - name: Collect screenshots
         if: always()
