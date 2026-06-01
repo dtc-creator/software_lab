@@ -1,96 +1,49 @@
- name: Windows Software Extractor
-  on:
-    workflow_dispatch:
-      inputs:
-        download_url:
-          description: "Direct URL to installer (.exe/.msi) or archive"
-          required: true
-        archive_password:
-          description: "Archive password (optional)"
-          required: false
-          default: ""
-  jobs:
-    extract:
-      runs-on: windows-latest
-      timeout-minutes: 120
-      steps:
-        - name: Download
-          shell: pwsh
-          run: Invoke-WebRequest -Uri "${{ github.event.inputs.download_url }}"
-  -OutFile installer.bin
-        - name: Extract (7-Zip + MSI admin-install + WiX layout)
-          shell: pwsh
-          run: |
-            choco install 7zip -y --no-progress | Out-Null
-            $z = "C:\Program Files\7-Zip\7z.exe"
-            New-Item -ItemType Directory -Force out | Out-Null
-            $pw = "${{ github.event.inputs.archive_password }}"
-            # generic archive/installer crack-open
-            & $z x installer.bin -oout -y ("-p"+$pw)
-            # if it's an MSI: administrative install = extract files, NO real install
-            if (Test-Path out\*.msi) {
-              Get-ChildItem out\*.msi | % { msiexec /a $_.FullName
-  TARGETDIR="$PWD\msi_out" /qn }
-            }
-            # if it's a WiX bundle exe: /layout pulls the inner MSI + runtimes
-            try { Start-Process .\installer.bin -ArgumentList
-  '/layout','C:\layout','/quiet' -Wait -NoNewWindow } catch {}
-        - name: Collect images + databases + manifest
-          shell: pwsh
-          run: |
-            New-Item -ItemType Directory -Force artifacts\pictures | Out-Null
-            Get-ChildItem -Recurse out,msi_out,C:\layout -Include
-  *.png,*.jpg,*.jpeg,*.bmp,*.ico -ErrorAction SilentlyContinue | Copy-Item -Destination  artifacts\pictures -ErrorAction SilentlyContinue
-            Get-ChildItem -Recurse out,msi_out,C:\layout -Include
-  *.db,*.sdf,*.sqlite,*.mdb,*.accdb -ErrorAction SilentlyContinue | Copy-Item
-  -Destination artifacts -ErrorAction SilentlyContinue
-            Get-ChildItem -Recurse out,msi_out,C:\layout -ErrorAction SilentlyContinue   | Select FullName,Length | Export-Csv artifacts\manifest.csv -NoTypeInformation
-            # generic archive/installer crack-open
-            & $z x installer.bin -oout -y ("-p"+$pw)
-            # if it's an MSI: administrative install = extract files, NO real install
-            if (Test-Path out\*.msi) {
-              Get-ChildItem out\*.msi | % { msiexec /a $_.FullName
-  TARGETDIR="$PWD\msi_out" /qn }
-            }
-            # if it's a WiX bundle exe: /layout pulls the inner MSI + runtimes
-            try { Start-Process .\installer.bin -ArgumentList
-  '/layout','C:\layout','/quiet' -Wait -NoNewWindow } catch {}
-        - name: Collect images + databases + manifest
-          shell: pwsh
-          run: |
-            New-Item -ItemType Directory -Force artifacts\pictures | Out-Null
-            Get-ChildItem -Recurse out,msi_out,C:\layout -Include
-  *.png,*.jpg,*.jpeg,*.bmp,*.ico -ErrorAction SilentlyContinue | Copy-Item -Destination  artifacts\pictures -ErrorAction SilentlyContinue
-            Get-ChildItem -Recurse out,msi_out,C:\layout -Include
-  *.db,*.sdf,*.sqlite,*.mdb,*.accdb -ErrorAction SilentlyContinue | Copy-Item
-  -Destination artifacts -ErrorAction SilentlyContinue
-            Get-ChildItem -Recurse out,msi_out,C:\layout -ErrorAction SilentlyContinue
-  | Select FullName,Length | Export-Csv artifacts\manifest.csv -NoTypeInformation
-        - name: Upload results
-          uses: actions/upload-artifact@v4
-            # generic archive/installer crack-open
-            & $z x installer.bin -oout -y ("-p"+$pw)
-            # if it's an MSI: administrative install = extract files, NO real install
-            if (Test-Path out\*.msi) {
-              Get-ChildItem out\*.msi | % { msiexec /a $_.FullName
-  TARGETDIR="$PWD\msi_out" /qn }
-            }
-            # if it's a WiX bundle exe: /layout pulls the inner MSI + runtimes
-            try { Start-Process .\installer.bin -ArgumentList
-  '/layout','C:\layout','/quiet' -Wait -NoNewWindow } catch {}
-        - name: Collect images + databases + manifest
-          shell: pwsh
-          run: |
-            New-Item -ItemType Directory -Force artifacts\pictures | Out-Null
-            Get-ChildItem -Recurse out,msi_out,C:\layout -Include
-  *.png,*.jpg,*.jpeg,*.bmp,*.ico -ErrorAction SilentlyContinue | Copy-Item -Destination  artifacts\pictures -ErrorAction SilentlyContinue
-            Get-ChildItem -Recurse out,msi_out,C:\layout -Include
-  *.db,*.sdf,*.sqlite,*.mdb,*.accdb -ErrorAction SilentlyContinue | Copy-Item
-  -Destination artifacts -ErrorAction SilentlyContinue
-            Get-ChildItem -Recurse out,msi_out,C:\layout -ErrorAction SilentlyContinue
-  | Select FullName,Length | Export-Csv artifacts\manifest.csv -NoTypeInformation
-        - name: Upload results
-          uses: actions/upload-artifact@v4
-          with:
-            name: extracted
-            path: artifacts
+name: Windows Software Extractor
+
+on:
+  workflow_dispatch:
+    inputs:
+      download_url:
+        description: "Direct URL to installer (.exe/.msi) or archive"
+        required: true
+      archive_password:
+        description: "Archive password (optional)"
+        required: false
+        default: ""
+
+jobs:
+  extract:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - name: Download
+        shell: pwsh
+        run: Invoke-WebRequest -Uri "${{ inputs.download_url }}" -OutFile installer.bin
+
+      - name: Extract
+        shell: pwsh
+        run: |
+          choco install 7zip -y --no-progress | Out-Null
+          $z = "C:\Program Files\7-Zip\7z.exe"
+          New-Item -ItemType Directory -Force out | Out-Null
+          $pw = "${{ inputs.archive_password }}"
+          & $z x installer.bin "-oout" -y ("-p" + $pw)
+          if (Test-Path out\*.msi) {
+            Get-ChildItem out\*.msi | ForEach-Object { msiexec /a $_.FullName TARGETDIR="$PWD\msi_out" /qn }
+          }
+          try { Start-Process .\installer.bin -ArgumentList '/layout','C:\layout','/quiet' -Wait -NoNewWindow } catch {}
+
+      - name: Collect images and databases
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts\pictures | Out-Null
+          $src = @("out","msi_out","C:\layout") | Where-Object { Test-Path $_ }
+          Get-ChildItem -Recurse $src -Include *.png,*.jpg,*.jpeg,*.bmp,*.ico -ErrorAction SilentlyContinue | Copy-Item -Destination artifacts\pictures -ErrorAction SilentlyContinue
+          Get-ChildItem -Recurse $src -Include *.db,*.sdf,*.sqlite,*.mdb,*.accdb -ErrorAction SilentlyContinue | Copy-Item -Destination artifacts -ErrorAction SilentlyContinue
+          Get-ChildItem -Recurse $src -ErrorAction SilentlyContinue | Select-Object FullName,Length | Export-Csv artifacts\manifest.csv -NoTypeInformation
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: extracted
+          path: artifacts
