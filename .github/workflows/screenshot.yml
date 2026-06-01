@@ -1,0 +1,59 @@
+name: JPRO Install + Screenshot
+on:
+  workflow_dispatch:
+    inputs:
+      installer_url:
+        description: "Direct URL to JproFullSetup.exe"
+        required: true
+        default: "https://s3.amazonaws.com/JPROUpdate/JPRO+Fleet+Diagnostics/JproFullSetup.exe"
+
+jobs:
+  install-shot:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Download installer
+        shell: pwsh
+        run: Invoke-WebRequest "${{ inputs.installer_url }}" -OutFile setup.exe
+
+      - name: Black-screen probe (does CopyFromScreen give real pixels?)
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+          $b=[System.Windows.Forms.SystemInformation]::VirtualScreen
+          $bmp=New-Object Drawing.Bitmap $b.Width,$b.Height
+          $g=[Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.Location,[Drawing.Point]::Empty,$b.Size)
+          New-Item -ItemType Directory -Force shots | Out-Null
+          $bmp.Save("$PWD\shots\00_probe_desktop.png")
+          # report screen size + whether top-left pixels are all black
+          $blk=$true; for($x=0;$x -lt [Math]::Min(50,$b.Width);$x++){ if($bmp.GetPixel($x,0).R -ne 0){$blk=$false;break} }
+          Write-Host "screen: $($b.Width)x$($b.Height)  toprow-all-black=$blk"
+
+      - name: Install JPRO (silent)
+        shell: pwsh
+        timeout-minutes: 30
+        continue-on-error: true
+        run: |
+          $p = Start-Process .\setup.exe -ArgumentList '/quiet','/norestart' -PassThru
+          if (-not $p.WaitForExit(1500000)) { $p.Kill(); Write-Host 'install timed out' }
+          else { Write-Host "install exit: $($p.ExitCode)" }
+          Get-ChildItem 'C:\Program Files','C:\Program Files (x86)' -Recurse -Include 'Fleets.exe','JPRO.exe' -EA SilentlyContinue | Select FullName
+
+      - name: Launch + screenshot burst
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+          function Shot($n){ $b=[System.Windows.Forms.SystemInformation]::VirtualScreen
+            $bmp=New-Object Drawing.Bitmap $b.Width,$b.Height
+            ([Drawing.Graphics]::FromImage($bmp)).CopyFromScreen($b.Location,[Drawing.Point]::Empty,$b.Size)
+            $bmp.Save("$PWD\shots\$n.png") }
+          $exe = Get-ChildItem 'C:\Program Files','C:\Program Files (x86)' -Recurse -Include 'Fleets.exe' -EA SilentlyContinue | Select-Object -First 1
+          if ($exe) { Write-Host "launching $($exe.FullName)"; Start-Process $exe.FullName } else { Write-Host "Fleets.exe not found" }
+          for($i=1;$i -le 12;$i++){ Start-Sleep 20; Shot ("{0:d2}_jpro" -f $i) }
+
+      - name: Upload screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: jpro-screenshots
+          path: shots
