@@ -1,0 +1,36 @@
+name: probe-gps51
+on:
+  workflow_dispatch:
+    inputs:
+      username: { required: true }
+      password: { required: true }
+      typ: { required: true }
+      server: { required: true }
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          python3 - <<'PY'
+          import json, urllib.request, os
+          server=os.environ['SERVER']
+          body={"type":os.environ.get('TYPE','DEVICE'),"from":"web",
+                "username":os.environ.get('USER_'),"password":os.environ.get('PASS_'),
+                "browser":"Chrome/104.0.0.0"}
+          req=urllib.request.Request(f"{server}/webapi?action=login",
+              data=json.dumps(body).encode(),
+              headers={"Content-Type":"application/json"},method="POST")
+          try:
+              r=urllib.request.urlopen(req,timeout=20)
+              print("RESULT:",r.read().decode())
+          except Exception as e:
+              print("ERR:",e)
+              try: print("BODY:", e.read().decode())
+              except Exception: pass
+          PY
+        env:
+          SERVER: ${{ github.event.inputs.server }}
+          TYPE: ${{ github.event.inputs.typ }}
+          USER_: ${{ github.event.inputs.username }}
+          PASS_: ${{ github.event.inputs.password }}
